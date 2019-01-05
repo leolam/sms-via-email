@@ -26,8 +26,7 @@ Setup Tips
 
 6. Configure your new Heroku application with your Twilio and SendGrid credentials:
 
-        heroku config:set SENDGRID_USERNAME=
-        heroku config:set SENDGRID_PASSWORD=
+        heroku config:set SENDGRID_API_KEY=
         heroku config:set TWILIO_ACCOUNT_SID=
         heroku config:set TWILIO_AUTH_TOKEN=
 

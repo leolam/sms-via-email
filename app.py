@@ -1,13 +1,14 @@
 import logging
 import os
-import ConfigParser
+import configparser
 
 from flask import Flask
 from flask import request
 from flask import url_for
-from twilio.rest import TwilioRestClient
+from twilio.rest import Client
 import phonenumbers as ph
 import sendgrid
+from sendgrid.helpers.mail import *
 import simplejson
 
 from konfig import Konfig
@@ -20,7 +21,7 @@ def warn(message):
 address_book = {}
 address_book_file = 'address-book.cfg'
 try:
-    user_list = ConfigParser.ConfigParser()
+    user_list = configparser.ConfigParser()
     user_list.read(address_book_file)
     for user in user_list.items('users'):
         address_book[user[0]] = user[1]
@@ -30,9 +31,8 @@ except:
 
 app = Flask(__name__)
 konf = Konfig()
-twilio_api = TwilioRestClient()
-sendgrid_api = sendgrid.SendGridClient(konf.sendgrid_username,
-                                       konf.sendgrid_password)
+twilio_api = Client()
+sg = sendgrid.SendGridAPIClient(konf.SENDGRID_API_KEY)
 
 
 class InvalidInput(Exception):
@@ -89,7 +89,7 @@ class Lookup:
         try:
             number = ph.parse(potential_number, 'US')
             phone_number = ph.format_number(number, ph.PhoneNumberFormat.E164)
-        except Exception, e:
+        except Exception as e:
             raise InvalidPhoneNumber(str(e))
 
         if phone_number in self.by_phone_number:
@@ -104,7 +104,7 @@ def phone_to_email(potential_number):
     try:
         number = ph.parse(potential_number, 'US')
         phone_number = ph.format_number(number, ph.PhoneNumberFormat.E164)
-    except Exception, e:
+    except Exception as e:
         raise InvalidPhoneNumber(str(e))
     phone_number = phone_number.replace('+', '')
     return("{}@{}".format(phone_number, konf.email_domain))
@@ -113,8 +113,8 @@ def phone_to_email(potential_number):
 def email_to_phone(from_email):
     '''Converts an email address like 14155551212@sms.example.com
        into a phone number like +14155551212'''
-    (username, domain) = from_email.split('@')
-
+    (username, domain) = from_email.split('@', 1)
+    username = username.strip('\"')
     potential_number = '+' + username
     try:
         ph_num = ph.parse(potential_number, 'US')
@@ -126,7 +126,7 @@ def email_to_phone(from_email):
 def check_for_missing_settings():
     rv = []
     for required in ['EMAIL_DOMAIN',
-                     'SENDGRID_USERNAME', 'SENDGRID_PASSWORD',
+                     'SENDGRID_API_KEY',
                      'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN']:
         value = getattr(konf, required)
         if not value:
@@ -151,7 +151,7 @@ def main():
         error_message = template.format(missing)
         return warn(error_message), 500
     elif duplicates_in_address_book():
-        print str(address_book)
+        print(str(address_book))
         error_message = ("Only one email address can be configured per "
                          "phone number. Please update the 'address-book.cfg' "
                          "file so that each phone number "
@@ -176,24 +176,23 @@ def main():
 def handle_sms():
     lookup = Lookup()
     try:
-        email = {
-            'text': request.form['Body'],
-            'subject': 'Text message',
-            'from_email': phone_to_email(request.form['From']),
-            'to': lookup.email_for_phone(request.form['To'])
-        }
-    except InvalidInput, e:
+        from_email = Email(phone_to_email(request.form['From']))
+        subject = 'Text message'
+        to_email = Email(lookup.email_for_phone(request.form['To']))
+        content = Content("text/plain",request.form['Body'])
+    except InvalidInput as e:
         return warn(str(e)), 400
 
-    message = sendgrid.Mail(**email)
-    (status, msg) = sendgrid_api.send(message)
-    if 'errors' in msg:
-        template = "Error sending message to SendGrid: {}"
-        errors = ', '.join(msg['errors'])
-        error_message = template.format(errors)
-        return warn(error_message), 400
-    else:
-        return '<Response></Response>'
+    try:
+        mail = Mail(from_email, subject, to_email, content)
+        response = sg.client.mail.send.post(request_body=mail.get())
+        if not (response.status_code == 200 or response.status_code == 202):
+            error_message = "Error sending message to SendGrid, status code " + str(response.status_code)
+            return warn(error_message), 400
+    except Exception as e:
+        return warn(str(e)), 400
+
+    return '<Response></Response>'
 
 
 @app.route('/handle-email', methods=['POST'])
@@ -202,20 +201,20 @@ def handle_email():
     try:
         envelope = simplejson.loads(request.form['envelope'])
         lines = request.form['text'].splitlines(True)
-        sms = {
-            'to': email_to_phone(request.form['to']),
-            'from_': lookup.phone_for_email(envelope['from']),
-            'body': lines[0]
-        }
-    except InvalidInput, e:
+    except InvalidInput as e:
         return warn(str(e))
 
     try:
-        rv = twilio_api.messages.create(**sms)
+        rv = twilio_api.messages.create(
+            to=email_to_phone(request.form['to']),
+            from_=lookup.phone_for_email(envelope['from']),
+            body=lines[0]
+            )
+
         return rv.sid
     except Exception as e:
-        print "oh no"
-        print str(e)
+        print("oh no")
+        print(str(e))
         error_message = "Error sending message to Twilio"
         return warn(error_message), 400
 
@@ -224,5 +223,5 @@ if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     if port == 5000:
         app.debug = True
-        print "in debug mode"
+        print("in debug mode")
     app.run(host='0.0.0.0', port=port)
